@@ -91,6 +91,34 @@ try {
   process.exitCode = 1
 }
 
+// 9. Sign-out must survive a kernel restart.
+//
+// Spawning a kernel is not a sign-in, but #spawn used to clear the sign-out
+// marker, so a restart (autoStart, DSH relaunch) silently re-authenticated the
+// account the user had just left and the panel showed "signed in" again.
+try {
+  const { TeleAgentEngine, readToken, isSignedOut, clearSignedOut } = await import(P + '/src/engine.js')
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ta-logout-'))
+  const e = new TeleAgentEngine({ port: 0, proxyPort: 0, stateDir: dir, log: () => {} })
+  await e.clearCredentials()
+  const markedAfterLogout = isSignedOut(dir)
+  await e.start().catch(() => {})
+  const markedAfterRestart = isSignedOut(dir)
+  const tokenAfterRestart = readToken({ stateDir: dir })
+  const keyRebuilt = fs.existsSync(path.join(dir, 'session.key'))
+  clearSignedOut(dir)
+  fs.rmSync(dir, { recursive: true, force: true })
+  const ok = markedAfterLogout && markedAfterRestart && tokenAfterRestart === null && !keyRebuilt
+  console.log('9. logout persists   :', ok ? 'survives restart OK' : 'FAILED (marker lost or token re-read)')
+  if (!ok) process.exitCode = 1
+} catch (e) {
+  console.log('9. logout persists   : ERROR -', e.message)
+  process.exitCode = 1
+}
+
 console.log('\nall offline checks done')
 // The plugin installs a status interval; exit explicitly rather than waiting.
 process.exit(0)

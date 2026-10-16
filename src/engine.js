@@ -476,6 +476,15 @@ export class TeleAgentEngine {
 
   /** Start the kernel if it is not already answering. */
   async start() {
+    // Refuse to start while signed out. Spawning would re-inject the account's
+    // token into a fresh kernel and rebuild session.key, quietly undoing the
+    // sign-out the user asked for.
+    if (isSignedOut(this.stateDir)) {
+      this.tokenState = 'missing'
+      this.log('signed out; not starting the kernel')
+      return
+    }
+
     // Idempotent by design: DSH may mount the plugin more than once, and the
     // panel no longer exposes kernel controls, so every caller must be safe to
     // call. Port already in use by *our own* proxy/kernel is a success, not a
@@ -492,7 +501,13 @@ export class TeleAgentEngine {
   }
 
   async #spawn() {
-    clearSignedOut(this.stateDir)
+    // Do NOT clear the sign-out marker here.
+    //
+    // Spawning a kernel is not a sign-in: DSH restarts, autoStart and any other
+    // call to start() all land here, and clearing the marker would silently
+    // re-authenticate an account the user had signed out of — the panel would
+    // show "signed in" again after a restart. The marker is cleared only by an
+    // explicit sign-in (index.js, on a successful token submit).
     await this.proxy.listen()
     const kernel = this.kernelPath ?? findKernel()
     if (!kernel) throw new Error('TeleAgent kernel not found — install the TeleAgent app first')
