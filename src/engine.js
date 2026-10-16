@@ -573,38 +573,101 @@ export class TeleAgentEngine {
    * signing requests. Without this, "sign out" did not actually revoke anything.
    */
   async forceStop() {
-    const pids = new Set()
-    // 1. the child handle, when this instance spawned it
-    if (this.child?.pid) pids.add(this.child.pid)
-    // 2. the recorded pid file, which survives a DSH restart
+    // Two stages, deliberately separated:
+    //   1. decide *which* pids may be signalled (identity-checked)
+    //   2. signal them, with self-protection on BOTH the SIGTERM and the SIGKILL
+    //      pass
+    //
+    // Identity checking is not optional. The pid file outlives the kernel it
+    // names — a kernel that exits on its own (DSH restart, crash) leaves the file
+    // behind — and macOS reuses pids aggressively, so a stale file can name an
+    // unrelated process. Killing that would be user-visible damage.
+    const candidates = new Set()
+    if (this.child?.pid) candidates.add(this.child.pid)
     try {
       const n = Number(fs.readFileSync(path.join(this.stateDir, 'kernel.pid'), 'utf8').trim())
-      if (Number.isInteger(n) && n > 0) pids.add(n)
+      if (Number.isInteger(n) && n > 0) candidates.add(n)
     } catch {}
-    // 3. whatever is actually listening on our port.
-    //
-    // Sources 1 and 2 both come from files we manage, so a kernel started before
-    // this code existed — or one whose pid file was deleted — would survive a
-    // sign-out and keep signing requests with the token still in its memory.
-    // The listener is the ground truth, so it is consulted last and can act
-    // alone.
-    for (const pid of await this.#pidsOnPort()) pids.add(pid)
-
-    let killed = 0
-    for (const pid of pids) {
-      if (pid === process.pid) continue
-      try { process.kill(pid, 'SIGTERM'); killed++ } catch {}
+    const portPids = await this.#pidsOnPort()
+    if (portPids === null) {
+      // No port discovery available: revocation may be incomplete, because a
+      // kernel we did not spawn and whose pid file is gone is only findable
+      // through its listener. Recorded so the UI can say so rather than claim a
+      // clean sign-out.
+      this.revokeIncomplete = true
+      this.log('warning: port lookup unavailable (lsof missing?); a kernel started outside this plugin may survive sign-out')
+    } else {
+      this.revokeIncomplete = false
+      for (const pid of portPids) candidates.add(pid)
     }
+
+    const targets = []
+    for (const pid of candidates) {
+      if (await this.#isSafelyOursKernel(pid)) targets.push(pid)
+    }
+
+    const self = new Set([process.pid, process.ppid].filter((n) => Number.isInteger(n)))
+    const signal = (sig) => {
+      let n = 0
+      for (const pid of targets) {
+        // Re-checked on both passes: the SIGKILL pass must never be able to
+        // signal us even if the candidate set somehow contained our own pid.
+        if (self.has(pid)) continue
+        try { process.kill(pid, sig); n++ } catch {}
+      }
+      return n
+    }
+
+    const killed = signal('SIGTERM')
     this.child = null
     if (killed) {
       await new Promise((r) => setTimeout(r, 600))
-      for (const pid of pids) {
-        try { process.kill(pid, 0); process.kill(pid, 'SIGKILL') } catch {}
+      const survivors = targets.filter((pid) => {
+        if (self.has(pid)) return false
+        try { process.kill(pid, 0); return true } catch { return false }
+      })
+      for (const pid of survivors) {
+        if (self.has(pid)) continue
+        try { process.kill(pid, 'SIGKILL') } catch {}
       }
     }
+
+    // The file is now stale by definition: it named a pid we either killed or
+    // refused to touch. Leaving it would re-arm the same hazard next time.
     try { fs.unlinkSync(path.join(this.stateDir, 'kernel.pid')) } catch {}
-    this.log(`forceStop: signalled ${killed} kernel process(es)`)
+    this.log(`forceStop: signalled ${killed} kernel process(es) from ${candidates.size} candidate(s)`)
     return killed
+  }
+
+  /**
+   * May we signal this pid?
+   *
+   * True only when the process is identifiably our kernel: either its command
+   * name matches the kernel binary (or a user-configured kernelPath), or it holds
+   * our engine port as a LISTEN socket. Anything else — including a pid whose
+   * identity cannot be read at all — is refused, so a recycled pid is never
+   * killed. Fail-closed on purpose.
+   */
+  async #isSafelyOursKernel(pid) {
+    if (!Number.isInteger(pid) || pid <= 0) return false
+    if (pid === process.pid || pid === process.ppid) return false
+
+    const { execFile } = await import('node:child_process')
+    const run = (cmd, args) => new Promise((resolve) => {
+      execFile(cmd, args, { timeout: 4000 }, (err, stdout) => resolve(err && !stdout ? '' : String(stdout)))
+    })
+
+    // 1. is it listening on our port?
+    const listeners = (await run('lsof', ['-ti', `tcp:${this.port}`, '-sTCP:LISTEN']))
+      .split(/\s+/).map(Number).filter(Number.isInteger)
+    if (listeners.includes(pid)) return true
+
+    // 2. does its command name look like the kernel we were told to use?
+    const comm = (await run('ps', ['-o', 'comm=', '-p', String(pid)])).trim()
+    if (!comm) return false   // unreadable identity: refuse rather than guess
+    const expected = this.kernelPath ? path.basename(this.kernelPath) : null
+    if (expected && comm.includes(expected)) return true
+    return /TeleAgent/i.test(comm)
   }
 
   /**
@@ -614,32 +677,33 @@ export class TeleAgentEngine {
    * considered, so this can never signal an unrelated process. Returns [] when
    * the platform has no `lsof`, leaving the file-based sources to do the work.
    */
+  /**
+   * PIDs holding our engine port as a LISTEN socket.
+   *
+   * Resolves null when the lookup could not run at all (lsof absent), which is
+   * kept distinct from [] ("ran, nothing listening") because the two mean
+   * different things for revocation completeness.
+   *
+   * `-sTCP:LISTEN` is essential, not cosmetic: plain `lsof -ti:PORT` also lists
+   * every process holding a *connection* to that port — including this plugin's
+   * own long-lived /event subscription — and signalling those would kill DSH
+   * itself.
+   *
+   * Identity is deliberately NOT judged here. A listener on our port is a
+   * candidate; whether it may be signalled is decided by #isSafelyOursKernel,
+   * which also consults the configured kernelPath. Filtering by name at this
+   * stage would drop a legitimately renamed kernel before it is ever considered.
+   */
   async #pidsOnPort() {
     const { execFile } = await import('node:child_process')
-    const run = (cmd, args) => new Promise((resolve) => {
-      execFile(cmd, args, { timeout: 4000 }, (err, stdout) => resolve(err && !stdout ? '' : String(stdout)))
+    const out = await new Promise((resolve) => {
+      execFile('lsof', ['-ti', `tcp:${this.port}`, '-sTCP:LISTEN'], { timeout: 4000 }, (err, stdout) => {
+        if (err && /ENOENT/.test(String(err.code ?? err.message))) return resolve(null)
+        resolve(err && !stdout ? '' : String(stdout))
+      })
     })
-
-    // `-sTCP:LISTEN` is essential, not cosmetic: plain `lsof -ti:PORT` also lists
-    // every process holding a *connection* to that port — including this plugin's
-    // own long-lived /event subscription. Killing those would kill DSH itself.
-    const out = await run('lsof', ['-ti', `tcp:${this.port}`, '-sTCP:LISTEN'])
-    const pids = out.split(/\s+/).map(Number).filter((n) => Number.isInteger(n) && n > 0)
-
-    const safe = []
-    for (const pid of pids) {
-      // Never signal ourselves or our parent, whatever the lookup returned.
-      if (pid === process.pid || pid === process.ppid) continue
-      // And confirm it really is the kernel, not some unrelated service that
-      // happens to hold the port.
-      const comm = (await run('ps', ['-o', 'comm=', '-p', String(pid)])).trim()
-      if (comm && !/TeleAgent/i.test(comm)) {
-        this.log(`port ${this.port} held by ${comm || pid}; not treating it as our kernel`)
-        continue
-      }
-      safe.push(pid)
-    }
-    return safe
+    if (out === null) return null
+    return out.split(/\s+/).map(Number).filter((n) => Number.isInteger(n) && n > 0)
   }
 
   /** Clear credentials this plugin stored (official sign-in token + key cache). */

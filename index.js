@@ -123,6 +123,7 @@ export function apply(ctx, config = {}) {
       tokenSource: token?.source ?? null,
       tokenState: engine.tokenState ?? (token ? 'unknown' : 'missing'),
       signedOut: !token,
+      revokeIncomplete: engine.revokeIncomplete === true,
       loginUrl: LOGIN_URL,
       loginPage: loginPageUrl({}),
       contextLength: (() => { try { return readPresetContextLength() } catch { return null } })(),
