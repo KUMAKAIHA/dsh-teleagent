@@ -185,6 +185,35 @@ export function readToken({ log, stateDir } = {}) {
   return null
 }
 
+/**
+ * Sign-out marker.
+ *
+ * Clearing only the plugin's own token file is not enough: the desktop app keeps
+ * its own session in LevelDB, so a plain read would fall back to it and
+ * re-surface the account the user just signed out of. The marker records the
+ * intent, and readToken() skips that fallback until the user signs in again.
+ */
+function signOutMarker(stateDir) {
+  return path.join(stateDir ?? path.join(os.homedir(), '.dsh/teleagent'), 'signed-out')
+}
+
+export function isSignedOut(stateDir) {
+  try { return fs.existsSync(signOutMarker(stateDir)) } catch { return false }
+}
+
+export function markSignedOut(stateDir) {
+  const p = signOutMarker(stateDir)
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true })
+    fs.writeFileSync(p, new Date().toISOString(), { mode: 0o600 })
+    return true
+  } catch { return false }
+}
+
+export function clearSignedOut(stateDir) {
+  try { fs.unlinkSync(signOutMarker(stateDir)); return true } catch { return false }
+}
+
 export function deviceIds() {
   const p = path.join(teleagentHome(), 'app-auth/device-meta.json')
   try {
@@ -213,6 +242,54 @@ const PRESET_CONTEXT = readPresetContextLength()
  * setting overrides the server-side default, which is how a 1M window configured
  * in the app applies here too. Read lazily so a settings change is picked up.
  */
+/**
+ * The account-level "preset context length".
+ *
+ * Tiers ship a server-side default (400K), but the desktop app lets the user set
+ * one length for every preset tier; that value is persisted per account in
+ * `preset-context.json` and is what the app itself injects into the kernel.
+ * Reading it here keeps the plugin's tier limits identical to the app's — this is
+ * how a 1M window configured in the app applies here too.
+ *
+ * Scoped to the *active* owner only: reading another account's setting would
+ * silently apply a different user's preference.
+ */
+export function readPresetContextLength() {
+  const home = teleagentHome()
+  try {
+    const owner = JSON.parse(fs.readFileSync(path.join(home, 'current-owner.json'), 'utf8')).ownerDir
+    const n = JSON.parse(fs.readFileSync(path.join(home, 'users', owner, 'preset-context.json'), 'utf8'))?.state?.contextLength
+    if (typeof n === 'number' && n > 0) return n
+  } catch {}
+  return null
+}
+
+/**
+ * Write the account-level preset context length.
+ *
+ * Same store the app's own "context length" setting uses, so the two stay
+ * consistent. Written atomically (temp file + rename) so a crash cannot leave
+ * the app unable to read its own setting.
+ */
+export function writePresetContextLength(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n < 1000) return { ok: false, error: 'context must be a number >= 1000' }
+  const home = teleagentHome()
+  let owner = null
+  try { owner = JSON.parse(fs.readFileSync(path.join(home, 'current-owner.json'), 'utf8')).ownerDir } catch {}
+  if (!owner) return { ok: false, error: 'no active account; sign in first' }
+  const file = path.join(home, 'users', owner, 'preset-context.json')
+  try {
+    const tmp = `${file}.tmp`
+    fs.writeFileSync(tmp, JSON.stringify({ state: { contextLength: n }, version: 1 }, null, 2) + '\n')
+    fs.renameSync(tmp, file)
+    refreshTiers()
+    return { ok: true, context: n }
+  } catch (e) {
+    return { ok: false, error: String(e?.message ?? e) }
+  }
+}
+
 const TIER_DEFAULTS = [
   { id: 'chat-flagship', name: '旗舰', description: '能力更强，适合 PPT、代码开发等复杂场景', context: 400000, output: 65536 },
   { id: 'chat-flash', name: '极速', description: '响应更快，适合问答、总结、改写等轻量场景', context: 400000, output: 65536 },
@@ -496,23 +573,31 @@ export class TeleAgentEngine {
    * signing requests. Without this, "sign out" did not actually revoke anything.
    */
   async forceStop() {
-    let killed = 0
-    // Prefer the pid we recorded; fall back to the pid file, which survives a
-    // DSH restart (the in-memory child handle does not).
     const pids = new Set()
+    // 1. the child handle, when this instance spawned it
     if (this.child?.pid) pids.add(this.child.pid)
+    // 2. the recorded pid file, which survives a DSH restart
     try {
       const n = Number(fs.readFileSync(path.join(this.stateDir, 'kernel.pid'), 'utf8').trim())
       if (Number.isInteger(n) && n > 0) pids.add(n)
     } catch {}
+    // 3. whatever is actually listening on our port.
+    //
+    // Sources 1 and 2 both come from files we manage, so a kernel started before
+    // this code existed — or one whose pid file was deleted — would survive a
+    // sign-out and keep signing requests with the token still in its memory.
+    // The listener is the ground truth, so it is consulted last and can act
+    // alone.
+    for (const pid of await this.#pidsOnPort()) pids.add(pid)
 
+    let killed = 0
     for (const pid of pids) {
+      if (pid === process.pid) continue
       try { process.kill(pid, 'SIGTERM'); killed++ } catch {}
     }
     this.child = null
     if (killed) {
       await new Promise((r) => setTimeout(r, 600))
-      // Escalate only for a process that ignored SIGTERM.
       for (const pid of pids) {
         try { process.kill(pid, 0); process.kill(pid, 'SIGKILL') } catch {}
       }
@@ -520,6 +605,24 @@ export class TeleAgentEngine {
     try { fs.unlinkSync(path.join(this.stateDir, 'kernel.pid')) } catch {}
     this.log(`forceStop: signalled ${killed} kernel process(es)`)
     return killed
+  }
+
+  /**
+   * PIDs listening on the kernel port.
+   *
+   * Deliberately narrow: only the process bound to *our* configured port is
+   * considered, so this can never signal an unrelated process. Returns [] when
+   * the platform has no `lsof`, leaving the file-based sources to do the work.
+   */
+  async #pidsOnPort() {
+    const { execFile } = await import('node:child_process')
+    return new Promise((resolve) => {
+      execFile('lsof', ['-ti', `tcp:${this.port}`, '-sTCP:LISTEN'], { timeout: 4000 }, (err, stdout) => {
+        if (err && !stdout) return resolve([])
+        const pids = String(stdout).split(/\s+/).map(Number).filter((n) => Number.isInteger(n) && n > 0)
+        resolve(pids)
+      })
+    })
   }
 
   /** Clear credentials this plugin stored (official sign-in token + key cache). */
