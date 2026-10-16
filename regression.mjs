@@ -55,6 +55,42 @@ console.log('7. token parsing      :',
   parseToken('https://example/cb?token=AB12:aaa.bbb.ccc') === 'AB12:aaa.bbb.ccc' ? 'url OK' : 'url FAIL',
   '|', parseToken('garbage') === null ? 'reject OK' : 'reject FAIL')
 
+// 8. Client half: actually render the settings section.
+//
+// The section crashed the whole slot with a ReferenceError (an identifier used
+// before its declaration), which made the panel silently disappear in the GUI.
+// A load-only check does not catch that, so the component is rendered here.
+try {
+  const fs = await import('node:fs')
+  const path = await import('node:path')
+  const file = path.join(P, 'lib/client.js')
+  let mod = null
+  global.window = { __ModuleLoader__: { load: (m) => { mod = m } }, addEventListener: () => {}, removeEventListener: () => {} }
+  const src = fs.readFileSync(file, 'utf8')
+  // eslint-disable-next-line no-eval
+  ;(0, eval)(src)
+  const react = {
+    createElement: (t, p, ...c) => (typeof t === 'function' ? { type: t, props: p } : { type: t, props: p, children: c }),
+    useState: (init) => [typeof init === 'function' ? init() : init, () => {}],
+    useEffect: (fn) => { try { fn() } catch {} },
+    useCallback: (fn) => fn,
+  }
+  const out = mod.factory((id) => (id === 'react' ? react : {}))
+  let section = null
+  out.apply({ slots: { inject: (n, gen) => { for (const _ of gen()) {} }, register: (a, b) => { section = b; return () => {} } } })
+  const walk = (node, depth = 0) => {
+    if (!node || typeof node !== 'object' || depth > 8) return
+    if (typeof node.type === 'function') { walk(node.type(node.props ?? {}), depth + 1); return }
+    const kids = node.children ?? (node.props && node.props.children)
+    for (const k of Array.isArray(kids) ? kids : [kids]) walk(k, depth + 1)
+  }
+  walk(section({}))
+  console.log('8. client section    : renders OK')
+} catch (e) {
+  console.log('8. client section    : RENDER FAILED -', e.message)
+  process.exitCode = 1
+}
+
 console.log('\nall offline checks done')
 // The plugin installs a status interval; exit explicitly rather than waiting.
 process.exit(0)
