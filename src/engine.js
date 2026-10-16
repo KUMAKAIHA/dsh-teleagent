@@ -486,12 +486,18 @@ export class TeleAgentEngine {
 
   /** Start the kernel if it is not already answering. */
   async start() {
-    // Refuse to start while signed out. Spawning would re-inject the account's
-    // token into a fresh kernel and rebuild session.key, quietly undoing the
-    // sign-out the user asked for.
-    if (isSignedOut(this.stateDir)) {
+    // Starting the kernel while signed out is pointless rather than harmful: the
+    // kernel needs a credential, and readToken() returns none, so #spawn would
+    // fail with a confusing error. Return quietly and let the panel say "not
+    // signed in".
+    //
+    // This deliberately does NOT depend on the marker alone: the marker means
+    // "do not fall back to the app's stored session", and treating it as a hard
+    // stop also blocked startup after a successful sign-in whenever the marker
+    // had not been cleared yet.
+    if (isSignedOut(this.stateDir) && !loadSavedToken()) {
       this.tokenState = 'missing'
-      this.log('signed out; not starting the kernel')
+      this.log('signed out and no stored credential; not starting the kernel')
       return
     }
 

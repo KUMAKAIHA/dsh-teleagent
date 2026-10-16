@@ -34,7 +34,7 @@ import { TeleAgentEngine } from './src/engine.js'
 import { TIERS, refreshTiers, writePresetContextLength } from './src/engine.js'
 import { readToken, readPresetContextLength } from './src/engine.js'
 import { startOfficialLogin, parseToken, decodeClaims, saveToken, loadToken, clearToken, loginPageUrl, AUTH_ENDPOINT } from './src/login.js'
-import { openLoginWindow, readLoginWindow } from './src/loginwindow.js'
+import { openLoginWindow, readLoginWindow, clearLoginSession } from './src/loginwindow.js'
 import { clearSignedOut } from './src/engine.js'
 
 export const name = 'teleagent'
@@ -238,8 +238,12 @@ export function apply(ctx, config = {}) {
               if (action === 'logout') {
                 clearToken()
                 const r = await engine.clearCredentials()
+                // The session lives in the sign-in window's cookies, so clearing
+                // local files alone leaves the next window already authenticated
+                // — the account could not be switched. Clear the cookie store too.
+                const c = clearLoginSession({ stateDir: engine.stateDir })
                 await publish()
-                return writeJson(res, 200, { ok: true, ...r })
+                return writeJson(res, 200, { ok: true, ...r, windowSessionCleared: c.ok })
               }
               writeJson(res, 400, { ok: false, error: `unknown action: ${action}` })
             } catch (e) { writeJson(res, 500, { ok: false, error: String(e?.message ?? e) }) }

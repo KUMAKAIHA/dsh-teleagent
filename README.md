@@ -28,14 +28,20 @@ TeleAgent 的上游网关只接受**官方内核签名**的请求。实测确认
 
 ## 安装
 
+### 方式一：插件管理器 / 市场（推荐）
+
+本包已按 DSH 插件规范声明：`dsh.bundle.patch`（`cordis.patch.yml`，含 `insert` 行）、`dsh.client`（客户端半身）、`files`、`peerDependencies`。
+在 DSH 的**插件**页安装 `dsh-teleagent` 即可，随后重启 DSH。
+
+### 方式二：手动放置
+
 ```bash
-# 1) 放进 DSH profile 的 node_modules
 cd ~/.dsh/profiles/desktop
 cp -R /path/to/dsh-teleagent node_modules/
 ```
 
 ```jsonc
-// 2) 注册到 package.json
+// 在 profile 的 package.json 中登记
 {
   "dependencies": { "dsh-teleagent": "file:./node_modules/dsh-teleagent" },
   "dsh": { "profile": { "bundles": [ /* … */ "dsh-teleagent" ] } }
@@ -43,10 +49,14 @@ cp -R /path/to/dsh-teleagent node_modules/
 ```
 
 ```bash
-# 3) 重启 DSH
+# 重启 DSH
 ```
 
-需要 `@deepseek-ai/schemastery` 作为 peer 依赖（DSH 已提供）。
+### 卸载
+
+从 profile 的 `dsh.profile.bundles` 与 `dependencies` 中移除 `dsh-teleagent`，删除 `node_modules/dsh-teleagent`，重启 DSH。插件不在别处留状态（运行时数据在 `~/.dsh/teleagent/`，可一并删除）。
+
+需要 `@deepseek-ai/schemastery`（peer 依赖，DSH 自带）。
 
 ## 面板
 

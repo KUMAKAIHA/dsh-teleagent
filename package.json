@@ -1,8 +1,8 @@
 {
   "name": "dsh-teleagent",
   "version": "1.0.0",
+  "description": "TeleAgent 档位模型接入 DSH：工具调用、可配置上下文（含 1M）、插件内官方登录。TeleAgent tier models for DeepSeek Harness with tool calling and in-panel sign-in.",
   "type": "module",
-  "description": "TeleAgent tiers (旗舰/极速) as a DSH LLM provider, with tool calling and 1M context",
   "license": "MIT",
   "main": "./index.js",
   "exports": {
@@ -10,11 +10,45 @@
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
+  "files": [
+    "index.js",
+    "lib/",
+    "src/",
+    "cordis.patch.yml",
+    "README.md",
+    "DELIVERY.md",
+    "regression.mjs",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KUMAKAIHA/dsh-teleagent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/KUMAKAIHA/dsh-teleagent/issues"
+  },
+  "homepage": "https://github.com/KUMAKAIHA/dsh-teleagent#readme",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "teleagent",
+    "llm",
+    "openai-compatible",
+    "agent"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
-      "inject": ["@deepseek-ai/dsh-client-ui-plugin-manager"]
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
     }
   },
   "peerDependencies": {
