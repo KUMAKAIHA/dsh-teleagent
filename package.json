@@ -55,6 +55,10 @@
     "@deepseek-ai/schemastery": "^3.18.4"
   },
   "scripts": {
-    "test": "node regression.mjs"
+    "test": "node regression.mjs",
+    "prepublishOnly": "node regression.mjs"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
