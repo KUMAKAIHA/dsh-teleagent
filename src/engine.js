@@ -616,19 +616,39 @@ export class TeleAgentEngine {
    */
   async #pidsOnPort() {
     const { execFile } = await import('node:child_process')
-    return new Promise((resolve) => {
-      execFile('lsof', ['-ti', `tcp:${this.port}`, '-sTCP:LISTEN'], { timeout: 4000 }, (err, stdout) => {
-        if (err && !stdout) return resolve([])
-        const pids = String(stdout).split(/\s+/).map(Number).filter((n) => Number.isInteger(n) && n > 0)
-        resolve(pids)
-      })
+    const run = (cmd, args) => new Promise((resolve) => {
+      execFile(cmd, args, { timeout: 4000 }, (err, stdout) => resolve(err && !stdout ? '' : String(stdout)))
     })
+
+    // `-sTCP:LISTEN` is essential, not cosmetic: plain `lsof -ti:PORT` also lists
+    // every process holding a *connection* to that port — including this plugin's
+    // own long-lived /event subscription. Killing those would kill DSH itself.
+    const out = await run('lsof', ['-ti', `tcp:${this.port}`, '-sTCP:LISTEN'])
+    const pids = out.split(/\s+/).map(Number).filter((n) => Number.isInteger(n) && n > 0)
+
+    const safe = []
+    for (const pid of pids) {
+      // Never signal ourselves or our parent, whatever the lookup returned.
+      if (pid === process.pid || pid === process.ppid) continue
+      // And confirm it really is the kernel, not some unrelated service that
+      // happens to hold the port.
+      const comm = (await run('ps', ['-o', 'comm=', '-p', String(pid)])).trim()
+      if (comm && !/TeleAgent/i.test(comm)) {
+        this.log(`port ${this.port} held by ${comm || pid}; not treating it as our kernel`)
+        continue
+      }
+      safe.push(pid)
+    }
+    return safe
   }
 
   /** Clear credentials this plugin stored (official sign-in token + key cache). */
   async clearCredentials() {
     let cleared = 0
-    for (const f of ['token.txt', 'provider-key.txt']) {
+    // session.key must go too, not just the token: it is the local API signing
+    // key, and while it remains on disk a freshly constructed engine can reload
+    // it and keep minting valid HMACs against a kernel that survived the stop.
+    for (const f of ['token.txt', 'provider-key.txt', 'session.key']) {
       try { fs.unlinkSync(path.join(this.stateDir, f)); cleared++ } catch {}
     }
     // Two separate concerns, both required:
