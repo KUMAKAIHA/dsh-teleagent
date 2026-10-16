@@ -146,6 +146,27 @@ try {
   process.exitCode = 1
 }
 
+// 11. Guard the generated-window template.
+//
+// The window's main script is a template literal. A stray backtick inside it
+// (easy to introduce in a comment) silently breaks the whole file, and the
+// failure surfaces only when a user presses sign-in.
+try {
+  const fs = await import('node:fs')
+  const path = await import('node:path')
+  const src = fs.readFileSync(path.join(P, 'src/loginwindow.js'), 'utf8')
+  const a = src.indexOf('function mainScriptSource(')
+  const b = src.indexOf('\n}\n', src.indexOf('uncaughtException', a))
+  const body = src.slice(a, b)
+  const ticks = (body.match(/\`/g) || []).length
+  const ok = ticks === 2
+  console.log('11. window template  :', ok ? 'balanced OK' : 'FAILED (' + ticks + ' backticks, expected 2)')
+  if (!ok) process.exitCode = 1
+} catch (e) {
+  console.log('11. window template  : ERROR -', e.message)
+  process.exitCode = 1
+}
+
 console.log('\nall offline checks done')
 // The plugin installs a status interval; exit explicitly rather than waiting.
 process.exit(0)

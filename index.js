@@ -33,7 +33,7 @@ import { TeleAgentAdapter, ROUTE, ROUTE_LABEL } from './src/adapter.js'
 import { TeleAgentEngine } from './src/engine.js'
 import { TIERS, refreshTiers, writePresetContextLength } from './src/engine.js'
 import { readToken, readPresetContextLength } from './src/engine.js'
-import { startOfficialLogin, parseToken, decodeClaims, saveToken, loadToken, clearToken, LOGIN_URL, loginPageUrl, LOGIN_MESSAGE_TYPE, AUTH_ENDPOINT } from './src/login.js'
+import { startOfficialLogin, parseToken, decodeClaims, saveToken, loadToken, clearToken, loginPageUrl, AUTH_ENDPOINT } from './src/login.js'
 import { openLoginWindow, readLoginWindow } from './src/loginwindow.js'
 import { clearSignedOut } from './src/engine.js'
 
@@ -130,13 +130,17 @@ export function apply(ctx, config = {}) {
       kernelPath: engine.kernelPath ?? null,
       account: token?.account ?? null,
       tokenSource: token?.source ?? null,
+      credentialKind: (() => {
+        const t = token?.token ?? ''
+        if (!t) return null
+        return /^[A-Za-z0-9]{1,16}\.[A-Za-z0-9_-]{16,}$/.test(t) ? 'auth-code' : 'jwt'
+      })(),
       tokenState: engine.tokenState ?? (token ? 'unknown' : 'missing'),
       signedOut: !token,
       revokeIncomplete: engine.revokeIncomplete === true,
-      loginUrl: LOGIN_URL,
+      loginUrl: AUTH_ENDPOINT,
       loginPage: loginPageUrl({}),
       contextLength: (() => { try { return readPresetContextLength() } catch { return null } })(),
-      loginMessageType: LOGIN_MESSAGE_TYPE,
       tokenExpires: token ? new Date(token.exp * 1000).toISOString() : null,
       tiers: TIERS.map((t) => ({ id: t.id, name: t.name, context: t.context, output: t.output })),
       lastError: engine.lastError ?? null,

@@ -118,28 +118,38 @@ export function decodeJwt(jwt) {
  * is worse than failing.
  */
 export function readToken({ log, stateDir } = {}) {
+  // Sign-out is checked FIRST, before any credential source.
+  //
+  // The saved-credential branch below used to run ahead of this, so a credential
+  // left in token.txt kept working after the user signed out — sign-out only
+  // deleted one file and this path found another. Nothing may be returned once
+  // the user has explicitly signed out.
+  if (isSignedOut(stateDir)) {
+    log?.('signed out by the user; no credential will be returned')
+    return null
+  }
+
   // A token obtained through the official sign-in page wins: it is the newest
   // explicit action by the user and does not require the desktop app at all.
   const saved = loadSavedToken()
   if (saved) {
     const claims = decodeJwt(saved.includes(':') ? saved.split(':', 2)[1] : saved)
-    if (claims?.exp && claims.exp * 1000 > Date.now()) {
-      log?.(`token from official sign-in: account=${claims.accountName ?? claims.accountId}`)
-      return { token: saved, exp: claims.exp, iat: claims.iat ?? 0, account: claims.accountName ?? claims.accountId, source: 'login' }
+    if (claims?.exp) {
+      if (claims.exp * 1000 > Date.now()) {
+        log?.(`token from official sign-in: account=${claims.accountName ?? claims.accountId}`)
+        return { token: saved, exp: claims.exp, iat: claims.iat ?? 0, account: claims.accountName ?? claims.accountId, source: 'login' }
+      }
+      log?.('saved sign-in token expired; falling back to app storage')
+    } else {
+      // An auth code (e.g. `ucc.<hex>`) is not a JWT: it carries no claims and
+      // therefore no expiry. It is the credential the official client uses, so
+      // it must be accepted as-is — treating "no exp" as "expired" discarded
+      // every sign-in made through the plugin's own window and silently fell
+      // back to an older account.
+      log?.('using saved sign-in credential (auth code, no exp claim)')
+      return { token: saved, exp: null, iat: 0, account: null, source: 'login' }
     }
-    log?.('saved sign-in token expired; falling back to app storage')
   }
-  // Respect an explicit sign-out.
-  //
-  // Clearing only our own token file is not enough: the desktop app keeps its
-  // session in LevelDB, so the fallback below would immediately re-surface the
-  // account the user just signed out of. A marker records the intent, and the
-  // app-storage fallback is skipped until the user signs in again.
-  if (isSignedOut(stateDir)) {
-    log?.('signed out by the user; not falling back to app storage')
-    return null
-  }
-
   const home = teleagentHome()
   const re = /"token":"([A-Za-z0-9]{4,12}:[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)"/
   const collect = (dir) => {

@@ -68,25 +68,74 @@ const log = (line) => {
 
 app.whenReady().then(async () => {
   log('ready electron=' + process.versions.electron)
-  const win = new BrowserWindow({ width: 960, height: 760, title: 'TeleAgent 登录' })
+
+  // Cookies are where the session actually lives: the provider answers the auth
+  // callback with Set-Cookie (X-Token / operationToken / operToken), and the
+  // desktop client reads its session from that cookie jar — its sign-out even
+  // clears cookies for the SSO origin rather than local storage. Without a
+  // persistent session here, the exchange completes in the page and the token is
+  // thrown away with the window.
+  const PARTITION = 'persist:teleagent-login'
+  const ses = session.fromPartition(PARTITION)
+
+  const win = new BrowserWindow({
+    width: 960, height: 760, title: 'TeleAgent 登录',
+    webPreferences: { partition: PARTITION },
+  })
   let settled = false
+
+  /** Read the session credential out of the cookie jar. */
+  const tokenFromCookies = async () => {
+    try {
+      const all = await ses.cookies.get({})
+      const pick = (name) => {
+        const c = all.filter((x) => x.name === name && x.value).pop()
+        return c ? decodeURIComponent(c.value) : null
+      }
+      return pick('X-Token') || pick('operationToken') || pick('operToken') || null
+    } catch (e) { log('cookie read failed: ' + e.message); return null }
+  }
+
+  const settle = async (reason) => {
+    if (settled) return
+    const tok = await tokenFromCookies()
+    if (!tok) { log('no credential in cookies yet (' + reason + ')'); return }
+    settled = true
+    write('token', tok)
+    write('status', 'done')
+    log('credential captured from cookies (' + reason + ')')
+    setTimeout(() => app.exit(0), 400)
+  }
 
   const inspect = (url) => {
     write('current-url', url)
-    const m = /[?&#]token=([^&]+)/.exec(url)
-    if (m && !settled) {
+    let u
+    try { u = new URL(url) } catch { return }
+
+    // A token is preferred when present, but usually is NOT: the callback
+    // carries only a code. The official client treats that code as the
+    // credential (it reads the code and hands it straight to completeLogin), so
+    // we accept it the same way. Waiting for a token here is what left every
+    // sign-in looking like it never completed.
+    const code = u.searchParams.get('code')
+    const token = u.searchParams.get('token')
+    const isCallback = u.pathname.includes('/cowork/auth')
+
+    // A token in the URL is final. A bare code is NOT: it is a one-time grant
+    // that the callback page still has to exchange, and the result arrives as a
+    // cookie. So on code we keep the window open and let the page run.
+    if (token && isCallback && !settled) {
       settled = true
-      write('token', decodeURIComponent(m[1]))
+      write('token', token)
       write('status', 'done')
-      log('token captured')
+      log('credential captured (url token)')
       setTimeout(() => app.exit(0), 400)
       return
     }
-    if (/\\/cowork\\/auth/.test(url) && /code=/.test(url) && !settled) {
-      // The callback arrived without a token in the URL: the code has to be
-      // exchanged, which only the provider's page can do, so keep the window
-      // open and let the page finish.
-      log('auth callback without token; waiting for the page to complete')
+    if (code && isCallback) {
+      write('code', code)
+      log('auth code seen; waiting for the page to exchange it')
+      setTimeout(() => settle('after callback'), 1500)
     }
   }
 
@@ -95,9 +144,40 @@ app.whenReady().then(async () => {
   win.webContents.on('did-fail-load', (_e, code, desc, url) => log('fail ' + code + ' ' + desc + ' ' + url))
   win.on('closed', () => { write('status', settled ? 'done' : 'closed'); app.exit(0) })
 
+  // Refuse to hand the OS the app's deeplink.
+  //
+  // When the callback page finishes it navigates to 'teleai-cowork://...', which
+  // makes macOS launch the TeleAgent app. We do not want that: the credential is
+  // already available in our own cookie jar, and launching another app is a
+  // surprising side effect of pressing sign-in here. The official client also
+  // intercepts this instead of letting the OS handle it (it calls
+  // preventDefault and dispatches internally).
+  // Anything that is not http(s) would be handed to the OS (the app's own
+  // protocol is 'teleai-cowork://'). http(s) navigation must still work.
+  const isDeeplink = (url) => typeof url === 'string' && !/^https?:\/\//i.test(url)
+  const blockDeeplink = (event, url) => {
+    if (!isDeeplink(url)) return
+    event.preventDefault()
+    log('blocked deeplink navigation: ' + String(url).slice(0, 60))
+    // The exchange has already happened by now; grab the credential immediately.
+    setTimeout(() => settle('deeplink blocked'), 300)
+  }
+  win.webContents.on('will-navigate', blockDeeplink)
+  win.webContents.on('will-redirect', blockDeeplink)
+  win.webContents.on('will-frame-navigate', (e) => blockDeeplink(e, e.url))
+  // Any attempt to open a new window goes through here; deny it outright.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    log('denied window.open: ' + String(url).slice(0, 60))
+    return { action: 'deny' }
+  })
+
   write('status', 'open')
   await win.loadURL(ENTRY)
   log('loaded')
+
+  // The exchange can also finish without a further navigation, so poll as well.
+  const timer = setInterval(() => { settle('poll') }, 2000)
+  win.on('closed', () => clearInterval(timer))
 })
 
 // Never let a crash in the window take anything else down with it.

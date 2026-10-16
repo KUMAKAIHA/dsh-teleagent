@@ -1,8 +1,14 @@
 node_modules/
 *.log
 .DS_Store
-# Local runtime state — never commit: contains the account's session token
+
+# Local runtime state — never commit. These hold the account's session token,
+# the local API signing key, and derived identifiers.
 state/
 token.txt
 session.key
 status.json
+provider-key.txt
+signed-out
+kernel.pid
+login-window/

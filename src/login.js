@@ -23,7 +23,6 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-const AUTH_URL = 'https://agent.teleai.com.cn/superCowork/sapi/cowork/auth'
 
 /** Open a URL in the user's default browser without shell interpolation. */
 function openBrowser(url) {
@@ -50,9 +49,15 @@ export function parseToken(input) {
     const c = u.searchParams.get('code')
     if (c && c.includes('.')) return c
   } catch {}
-  // Accept a bare token (JWT with a tenant prefix, or a raw JWT).
+  // Accept a bare token: `tenant:jwt`, a raw JWT, or an auth code.
+  //
+  // The callback normally carries only `code` (e.g. `ucc.<hex>`), never a token,
+  // and the official client treats that code as the credential itself — it reads
+  // `code` and passes it straight through. Rejecting it here made every real
+  // sign-in look unparseable.
   if (/^[A-Za-z0-9]{4,12}:[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(s)) return s
   if (/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(s)) return s
+  if (/^[A-Za-z0-9]{1,16}\.[A-Za-z0-9_-]{16,}$/.test(s)) return s
   return null
 }
 
@@ -84,67 +89,28 @@ export function clearToken() {
 }
 
 /**
- * Local callback listener.
- *
- * The WEB flow accepts a caller-supplied redirect (`redirect_url`), which the
- * page forwards as `state` to the official callback endpoint. Pointing that at a
- * loopback address lets the issued token arrive here directly, so sign-in
- * completes without the user copying anything.
- *
- * Embedding the official page instead does NOT work: the page validates the
- * message origin against a whitelist (`teleai.com.cn`, `www.teleai.com.cn`,
- * `ai-pre.teleagi.cn`, `agent-pre.teleai.com.cn`) and silently drops the relay
- * from any other parent — which is why the embedded iframe only ever showed a
- * timeout regardless of `source`.
- */
-export async function startCallbackListener({ port = 0, signal } = {}) {
-  const http = await import('node:http')
-  return new Promise((resolve, reject) => {
-    const server = http.createServer((req, res) => {
-      const u = new URL(req.url ?? '/', `http://127.0.0.1:${server.address()?.port ?? 0}`)
-      const token = u.searchParams.get('token')
-      const code = u.searchParams.get('code')
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-      res.end('<!doctype html><meta charset="utf-8"><title>已完成</title>'
-        + '<body style="font:14px -apple-system,sans-serif;padding:40px">登录已完成，可以关闭此页面并回到 DSH。</body>')
-      if (token || code) {
-        // Expose on the server object: the listener outlives this request, and
-        // callers poll it rather than holding a promise open for minutes.
-        server.token = token ?? code
-        server.emit('token', server.token)
-      }
-    })
-    server.once('error', reject)
-    server.listen(port, '127.0.0.1', () => {
-      const actual = server.address().port
-      resolve({ server, port: actual, close: () => server.close(), wait: null })
-    })
-    signal?.addEventListener('abort', () => { try { server.close() } catch {} }, { once: true })
-  })
-}
-
-/**
  * Step 1 of the flow: send the user to the official page.
  *
  * `redirectUrl` uses the WEB flow, which is the only flow that honours a
  * caller-supplied redirect. Without it the page targets its own default and the
  * token never reaches us.
  */
+/**
+ * Build the start URL for sign-in.
+ *
+ * Deliberately does NOT open anything: the plugin opens its own window and reads
+ * the navigation it performs. Opening a browser here as well produced two
+ * windows side by side, and the browser one could never hand the credential back.
+ * `openBrowser` remains exported for callers that genuinely want a browser.
+ */
 export function startOfficialLogin(redirectUrl) {
-  const url = loginPageUrl({ redirectUrl })
-  return { url, opened: openBrowser(url) }
+  return { url: loginPageUrl({ redirectUrl }) }
 }
 
-/**
- * The official login page relays its own redirect back to whoever embeds it.
- *
- * Verified in the shipped client: the page embeds a relay script that listens
- * for `{ type: 'loginRedirect', url }` from a nested frame and re-posts it to
- * `window.parent`. That is what lets the desktop app read the issued token
- * without the user doing anything — and it means an embedded iframe can receive
- * the token directly, with no copy/paste step.
- */
-export const LOGIN_MESSAGE_TYPE = 'loginRedirect'
+/** Open a URL in the user's default browser. Only for explicit browser flows. */
+export function openInBrowser(url) {
+  return openBrowser(url)
+}
 
 /**
  * Where sign-in actually starts.
@@ -185,4 +151,3 @@ export function loginPageUrl({ tokenCode, source, redirectUrl } = {}) {
   return u.toString()
 }
 
-export const LOGIN_URL = AUTH_URL
