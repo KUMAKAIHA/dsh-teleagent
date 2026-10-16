@@ -86,7 +86,28 @@ lsof 缺失兜底 · 路由级 E2E 7/7 · 登出→再登录闭环      PASS
 
 ---
 
-## 四、⚠️ 未验证的边界（请务必知悉）
+## 三·补、DSH 兼容性结论（独立验证）
+
+```
+5 项全部 PASS：
+  安装态可加载          IMPORT OK，6/6 文件与基线逐字节一致
+  不破坏 DSH 配置       全部 fs 写入点落在 stateDir / ~/.dsh/teleagent /
+                        TeleAgent 安装目录；"package.json|cordis|profiles|bundles"
+                        在运行时文件中命中数全为 0；profile 三个文件 sha256 未变
+  隔离 profile 启动     12-bundle 全栈复刻，7 项断言零命中，roster 74 行无截断
+   forceStop 不误杀     3 个攻击向量全拦，正对照真内核仍被杀，DSH 端口返回 0
+  未装 TeleAgent 降级   DSH 正常启动，插件降级为可读错误而非崩溃
+```
+
+**最有价值的一条**：把插件的一个 export 删掉后，DSH 仍正常启动，只有该 entry 失败（`1 entry did not activate`），其它插件全部正常 —— **故障被隔离在单个 entry**，不会再出现历史上"把 DSH 搞挂"的情况。
+
+## 四、⚠️ 未验证的边界与已知风险（请务必知悉）
+
+### 已知风险（非阻断）
+
+- **内核监听 `0.0.0.0:<enginePort>`**：绑定地址由内核自身决定，插件无法配置。仅 `/health` 无鉴权，其余端点 401。
+- **隔离 profile 不隔离账号可见性**：`readToken()` 按 `TELEAGENT_HOME` 定位，不受 `stateDir` 约束。这是复用应用登录的设计使然，但意味着"隔离实例"仍能读到本机已登录账号。
+
 
 1. **服务端 token 是否失效，未验证。** 全程零推理请求（账号敏感），因此只能证明"内核进程已死 + 内存凭据随进程消失 + 本地签名密钥已清"，**不能**证明服务端该会话已失效。
 2. **真内核上的整套 forceStop 未跑。** 使用行为等价的假内核替代；真内核响应 SIGTERM 由生产日志 29 次 `Received signal: terminated` 间接证实，但未在真内核上端到端验证。

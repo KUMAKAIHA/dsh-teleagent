@@ -37,7 +37,7 @@ import { startOfficialLogin, startCallbackListener, parseToken, decodeClaims, sa
 import { clearSignedOut } from './src/engine.js'
 
 export const name = 'teleagent'
-export const version = '1.1.0'
+export const version = '1.0.0'
 
 /** Only the facility the plugin cannot exist without. */
 export const inject = ['llm']
@@ -65,8 +65,16 @@ export const Config = z === null ? undefined : z.object({
   tier: z.string().default('chat-flagship').description('默认档位（chat-flagship 旗舰 / chat-flash 极速）'),
 })
 
-function statusPath() {
-  return path.join(os.homedir(), '.dsh/teleagent/status.json')
+/**
+ * Where the live status snapshot is written.
+ *
+ * Follows the configured stateDir: hard-coding the home path made every instance
+ * — a second profile, a test harness — overwrite the same file, so two running
+ * plugins clobbered each other's status.
+ */
+function statusPath(engine) {
+  const dir = engine?.stateDir ?? process.env.TA_STATE_DIR ?? path.join(os.homedir(), '.dsh/teleagent')
+  return path.join(dir, 'status.json')
 }
 
 export function apply(ctx, config = {}) {
@@ -133,8 +141,8 @@ export function apply(ctx, config = {}) {
       lastError: engine.lastError ?? null,
     }
     try {
-      fs.mkdirSync(path.dirname(statusPath()), { recursive: true })
-      fs.writeFileSync(statusPath(), JSON.stringify(report, null, 2), { mode: 0o600 })
+      fs.mkdirSync(path.dirname(statusPath(engine)), { recursive: true })
+      fs.writeFileSync(statusPath(engine), JSON.stringify(report, null, 2), { mode: 0o600 })
     } catch {}
     return report
   }
