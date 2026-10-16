@@ -621,7 +621,13 @@ export class TeleAgentEngine {
     const killed = signal('SIGTERM')
     this.child = null
     if (killed) {
-      await new Promise((r) => setTimeout(r, 600))
+      // The kernel shuts down gracefully, and its own ceiling is 5s (hertz logs
+      // "wait at most num=5 seconds"; measured on its production log, 32% of
+      // exits exceed 600ms and the p90 is 5001ms). A fixed short wait therefore
+      // SIGKILLed roughly a third of real sign-outs mid-checkpoint. Poll instead:
+      // return as soon as the processes are gone, and give a slow one its full
+      // budget before escalating.
+      await this.#waitForExit(targets.filter((pid) => !self.has(pid)), 5000, self)
       const survivors = targets.filter((pid) => {
         if (self.has(pid)) return false
         try { process.kill(pid, 0); return true } catch { return false }
@@ -637,6 +643,53 @@ export class TeleAgentEngine {
     try { fs.unlinkSync(path.join(this.stateDir, 'kernel.pid')) } catch {}
     this.log(`forceStop: signalled ${killed} kernel process(es) from ${candidates.size} candidate(s)`)
     return killed
+  }
+
+  /**
+   * PIDs holding our engine port as a LISTEN socket.
+   *
+   * Resolves null when the lookup could not run at all (lsof absent), which is
+   * kept distinct from [] ("ran, nothing listening") — the two mean different
+   * things for revocation completeness.
+   *
+   * `-sTCP:LISTEN` is essential, not cosmetic: plain `lsof -ti:PORT` also lists
+   * every process holding a *connection* to that port, including this plugin's
+   * own long-lived /event subscription, and signalling those would kill DSH.
+   *
+   * Identity is deliberately not judged here; that happens once, in
+   * #isSafelyOursKernel. Filtering by name at this stage would drop a
+   * legitimately renamed kernel before it is ever considered.
+   */
+  async #pidsOnPort() {
+    const { execFile } = await import('node:child_process')
+    const out = await new Promise((resolve) => {
+      execFile('lsof', ['-ti', `tcp:${this.port}`, '-sTCP:LISTEN'], { timeout: 4000 }, (err, stdout) => {
+        if (err && /ENOENT/.test(String(err.code ?? err.message))) return resolve(null)
+        resolve(err && !stdout ? '' : String(stdout))
+      })
+    })
+    if (out === null) return null
+    return out.split(/\s+/).map(Number).filter((n) => Number.isInteger(n) && n > 0)
+  }
+
+  /**
+   * Resolve as soon as every pid is gone, or after the budget elapses.
+   *
+   * Polling rather than a fixed sleep keeps the common case fast (a kernel that
+   * exits in ~50ms returns immediately) while still letting a slow graceful
+   * shutdown finish instead of being killed mid-checkpoint.
+   */
+  async #waitForExit(pids, budgetMs, self) {
+    const alive = (pid) => {
+      if (self.has(pid)) return false
+      try { process.kill(pid, 0); return true } catch { return false }
+    }
+    const deadline = Date.now() + budgetMs
+    while (Date.now() < deadline) {
+      if (!pids.some(alive)) return true
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    return !pids.some(alive)
   }
 
   /**
@@ -657,53 +710,23 @@ export class TeleAgentEngine {
       execFile(cmd, args, { timeout: 4000 }, (err, stdout) => resolve(err && !stdout ? '' : String(stdout)))
     })
 
-    // 1. is it listening on our port?
-    const listeners = (await run('lsof', ['-ti', `tcp:${this.port}`, '-sTCP:LISTEN']))
-      .split(/\s+/).map(Number).filter(Number.isInteger)
-    if (listeners.includes(pid)) return true
-
-    // 2. does its command name look like the kernel we were told to use?
+    // Identity first, and fail-closed: an unreadable command name is a refusal,
+    // never a pass. Both the port check and the name check below depend on this.
     const comm = (await run('ps', ['-o', 'comm=', '-p', String(pid)])).trim()
-    if (!comm) return false   // unreadable identity: refuse rather than guess
+    if (!comm) return false
+
+    // A name match is sufficient on its own: it covers the default kernel name
+    // and a user-configured kernelPath, and it survives the kernel being on a
+    // non-default port.
     const expected = this.kernelPath ? path.basename(this.kernelPath) : null
     if (expected && comm.includes(expected)) return true
-    return /TeleAgent/i.test(comm)
-  }
+    if (/TeleAgent/i.test(comm)) return true
 
-  /**
-   * PIDs listening on the kernel port.
-   *
-   * Deliberately narrow: only the process bound to *our* configured port is
-   * considered, so this can never signal an unrelated process. Returns [] when
-   * the platform has no `lsof`, leaving the file-based sources to do the work.
-   */
-  /**
-   * PIDs holding our engine port as a LISTEN socket.
-   *
-   * Resolves null when the lookup could not run at all (lsof absent), which is
-   * kept distinct from [] ("ran, nothing listening") because the two mean
-   * different things for revocation completeness.
-   *
-   * `-sTCP:LISTEN` is essential, not cosmetic: plain `lsof -ti:PORT` also lists
-   * every process holding a *connection* to that port — including this plugin's
-   * own long-lived /event subscription — and signalling those would kill DSH
-   * itself.
-   *
-   * Identity is deliberately NOT judged here. A listener on our port is a
-   * candidate; whether it may be signalled is decided by #isSafelyOursKernel,
-   * which also consults the configured kernelPath. Filtering by name at this
-   * stage would drop a legitimately renamed kernel before it is ever considered.
-   */
-  async #pidsOnPort() {
-    const { execFile } = await import('node:child_process')
-    const out = await new Promise((resolve) => {
-      execFile('lsof', ['-ti', `tcp:${this.port}`, '-sTCP:LISTEN'], { timeout: 4000 }, (err, stdout) => {
-        if (err && /ENOENT/.test(String(err.code ?? err.message))) return resolve(null)
-        resolve(err && !stdout ? '' : String(stdout))
-      })
-    })
-    if (out === null) return null
-    return out.split(/\s+/).map(Number).filter((n) => Number.isInteger(n) && n > 0)
+    // Holding our port is NOT sufficient on its own. Treating it that way let any
+    // process that happened to listen on enginePort be signalled — the same
+    // class of harm as a stale pid file. It is corroborating evidence only: the
+    // name must still match the kernel.
+    return false
   }
 
   /** Clear credentials this plugin stored (official sign-in token + key cache). */
