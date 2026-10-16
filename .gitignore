@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.DS_Store
+# Local runtime state — never commit: contains the account's session token
+state/
+token.txt
+session.key
+status.json

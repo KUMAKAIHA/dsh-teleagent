@@ -1,0 +1,26 @@
+{
+  "name": "dsh-teleagent",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "TeleAgent tiers (旗舰/极速) as a DSH LLM provider, with tool calling and 1M context",
+  "license": "MIT",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "inject": ["@deepseek-ai/dsh-client-ui-plugin-manager"]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.4"
+  },
+  "scripts": {
+    "test": "node regression.mjs"
+  }
+}

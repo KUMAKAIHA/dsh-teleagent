@@ -1,0 +1,5 @@
+# dsh-teleagent bundle patch.
+- insert:
+    - id: teleagent
+      name: 'dsh-teleagent'
+      config: {}
