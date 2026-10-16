@@ -797,6 +797,43 @@ export class TeleAgentEngine {
     if (wait > 0) await new Promise((r) => setTimeout(r, wait))
   }
 
+  /**
+   * partID -> part type, read from the kernel's own database.
+   *
+   * The event stream's `message.part.delta` frames carry no type, and
+   * `message.part.updated` is not always emitted (measured: zero such frames on
+   * every live turn so far). Without a type map, reasoning deltas are
+   * indistinguishable from answer deltas and leak into the visible response.
+   *
+   * The kernel persists parts to a local SQLite file, so the map is read from
+   * there. Read-only, best-effort: on any failure the caller falls back to
+   * treating everything as answer text.
+   */
+  async partTypeMap(sessionID) {
+    try {
+      const { execFile } = await import('node:child_process')
+      const db = path.join(this.stateDir, 'data', 'teleagent.db')
+      if (!fs.existsSync(db)) return null
+      const out = await new Promise((resolve) => {
+        execFile('sqlite3', ['-readonly', db,
+          `select id, data from part where session_id='${String(sessionID).replace(/'/g, "''")}'`],
+        { timeout: 4000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => resolve(err && !stdout ? '' : String(stdout)))
+      })
+      const map = new Map()
+      for (const line of out.split('\n')) {
+        if (!line) continue
+        const sep = line.indexOf('|')
+        if (sep < 0) continue
+        const id = line.slice(0, sep)
+        try {
+          const type = JSON.parse(line.slice(sep + 1)).type
+          if (type) map.set(id, type)
+        } catch {}
+      }
+      return map.size ? map : null
+    } catch { return null }
+  }
+
   /** One-shot completion. Returns the authoritative final assistant message. */
   async complete({ model, prompt, agent = 'dsh-bridge', onDelta, signal }) {
     const session = await this.request('POST', '/session', { title: 'dsh' })
@@ -807,22 +844,76 @@ export class TeleAgentEngine {
     let settle
     const finished = new Promise((r) => { settle = r })
 
+    this.partTypes = new Map()
+
+    // The stream announces no types: `message.part.delta` carries only a partID
+    // and `message.part.updated` is not emitted at all (measured). Parts are
+    // persisted to the kernel's SQLite file instead, so types are read from
+    // there — on demand, the first time a delta for an unknown part arrives.
+    //
+    // Reading once up-front is not enough: parts only exist after the request is
+    // sent, so the map would be empty. Reading on every delta is wasteful, so we
+    // resolve once and cache, then route unconditionally.
+    let resolving = null
+    const resolveTypes = () => {
+      if (!resolving) {
+        resolving = this.partTypeMap(sid)
+          .then((m) => { if (m) for (const [k, v] of m) this.partTypes.set(k, v); return m })
+          .catch(() => null)
+      }
+      return resolving
+    }
+
+    // Deltas for parts whose type is still unknown are held (briefly) rather than
+    // emitted, because emitting a reasoning delta as answer text is the defect
+    // this whole mechanism exists to prevent. Anything still held when the turn
+    // ends is flushed as answer text so nothing is lost.
+    const held = []
+    let ready = false
+
+    const emit = (kind, piece) => {
+      if (kind === 'reasoning') reasoning += piece
+      else { text += piece; onDelta?.(piece) }
+    }
+
     const unsub = this.#subscribe(sid, (ev) => {
       const p = ev.properties ?? {}
-      if (ev.type === 'message.part.updated' && p.part?.id) {
-        const prev = parts.get(p.part.id) ?? { type: p.part.type, sent: 0 }
-        prev.type = p.part.type
-        const full = p.part.text
-        if (typeof full === 'string' && full.length > prev.sent) {
-          const delta = full.slice(prev.sent)
-          prev.sent = full.length
-          if (p.part.type === 'reasoning') reasoning += delta
-          else { text += delta; onDelta?.(delta) }
-        }
-        parts.set(p.part.id, prev)
+
+      // Deltas are the primary source, and they ARE real streaming: measured on
+      // live turns, tens of frames arrive within ~1.4s while `part.updated`
+      // never carries text. An earlier revision trusted only `updated`, dropped
+      // every chunk, and produced the "no answer, only thinking" symptom.
+      if (ev.type === 'message.part.delta' && p.field === 'text') {
+        const piece = p.delta ?? ''
+        const kind = this.partTypes.get(p.partID)
+        if (kind) { emit(kind, piece); return }
+        if (ready) { emit('text', piece); return }
+        // Unknown and not yet resolved: hold this piece and kick a resolution.
+        held.push({ partID: p.partID, piece })
+        resolveTypes().then(() => {
+          if (!ready) {
+            ready = true
+            for (const h of held.splice(0)) emit(this.partTypes.get(h.partID) ?? 'text', h.piece)
+          }
+        })
+        return
       }
-      if (ev.type === 'session.status' && p.sessionID === sid && p.status?.type === 'idle') { done = true; settle() }
-      if (ev.type === 'session.error' && p.sessionID === sid) { done = true; settle() }
+
+      if (ev.type === 'message.part.updated' && p.part?.id) {
+        this.partTypes.set(p.part.id, p.part.type)
+        return
+      }
+
+      if (ev.type === 'session.status' && p.sessionID === sid && p.status?.type === 'idle') {
+        ready = true
+        for (const h of held.splice(0)) emit(this.partTypes.get(h.partID) ?? 'text', h.piece)
+        done = true; settle()
+      }
+      if (ev.type === 'session.error' && p.sessionID === sid) {
+        ready = true
+        for (const h of held.splice(0)) emit(this.partTypes.get(h.partID) ?? 'text', h.piece)
+        done = true; settle()
+      }
     })
 
     const onAbort = () => { this.request('POST', `/session/${sid}/abort`).catch(() => {}); settle() }
