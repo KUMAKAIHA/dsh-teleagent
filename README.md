@@ -88,7 +88,15 @@ cp -R /path/to/dsh-teleagent node_modules/
 | `kernelPath` | 自动探测 | 内核二进制路径 |
 | `stateDir` | `~/.dsh/teleagent` | 内核数据目录 |
 
-环境变量：`TA_PROVIDER_APIKEY`（覆盖 provider apiKey）、`TA_PROVIDER_BASEURL`（自建端点）、`TELEAGENT_HOME`（TeleAgent 安装位置）、`TELEAGENT_ASAR`（客户端 bundle 路径）。
+环境变量：
+
+| 变量 | 用途 |
+|---|---|
+| `TA_PROVIDER_APIKEY` | 覆盖 provider apiKey（否则从本机客户端读取） |
+| `TA_PROVIDER_BASEURL` | 指向自建/替代端点 |
+| `TA_SIGNPROXY_ORIGIN` | 覆盖签名代理转发的上游 origin |
+| `TELEAGENT_HOME` | TeleAgent 数据根（默认 `~/.local/share/TeleAgent`） |
+| `TELEAGENT_ASAR` | 客户端 bundle 路径（默认 macOS 安装位置） |
 
 ## 诊断
 
@@ -117,6 +125,26 @@ node regression.mjs   # 离线自检，不发任何上游请求
 | deviceId / installId | 运行时从 `app-auth/device-meta.json` 读取 |
 
 provider apiKey 是编译进官方客户端的共享常量（对每台安装都相同、不由账号派生），但本插件不把它写进仓库——需要时从你自己的那份客户端里取。
+
+## 安全说明（请阅读）
+
+### 已知暴露面
+
+- **内核监听 `0.0.0.0:<enginePort>`，而非仅回环。** 绑定地址由内核自身决定，不可通过环境变量配置（实测只有 `SERVER_PORT` 生效，`WithHostPorts` 使用内核内部默认值）。插件无法改变这一点。
+  - 实测：`curl http://<本机局域网IP>:4399/health` 返回 200；其余端点均返回 401 `local_auth_missing`。
+  - **建议**：在不受信任的局域网（公共 WiFi 等）中，考虑用系统防火墙限制该端口，或改用非默认端口。
+- **设置桥** 仅接受回环 + 同源请求（校验 `Origin` 与 `Host`），并拒绝跨站调用；它暴露账号名与凭证过期时间，因此这一层校验是必要的。
+- **不校验 JWT 签名**。插件只做 base64 解码以读取账号名与过期时间，不验证签名或签发方。伪造的 token 无法通过上游（上游会拒绝），但可能让面板显示攻击者选定的账号名。不因此构成鉴权绕过。
+- **复用未公开的私有协议**：本插件通过官方客户端的内核二进制驱动模型（`SERVER_PORT` 环境协议、stdin 注入加密鉴权态、本地 `local-v1` 签名头）。这些接口没有公开文档，**可能随官方客户端升级而失效**；厂商立场未知。
+- provider apiKey 的解析锚定在客户端 bundle 的 `apiKey … useSuperAgentAuth` 结构上（在 402MB 文件中分窗扫描）。**客户端更新后可能失效**，届时需用 `TA_PROVIDER_APIKEY` 覆盖。
+
+### 凭据守恒
+
+- 仓库内**不含任何密钥**。
+- 所有凭据仅在本机解析与使用：`~/.dsh/teleagent/`（插件自身状态，0600）与 `~/.local/share/TeleAgent/`（官方客户端数据）。
+- 出站目标**只有** `https://agent.teleai.com.cn`；无遥测、无分析上报。
+- **不跨账号回退**：若当前活跃账号无可用 token，插件直接失败并提示登录，不会去挑其他账号的 token。
+- **登出即撤销**：清除本地凭据、写入登出标记（阻止回退到应用存储）、并终止正在运行的内核进程（内核内存中持有 token，仅删文件不足以撤销）。
 
 ## 许可
 
