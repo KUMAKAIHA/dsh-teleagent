@@ -33,7 +33,8 @@ import { TeleAgentAdapter, ROUTE, ROUTE_LABEL } from './src/adapter.js'
 import { TeleAgentEngine } from './src/engine.js'
 import { TIERS, refreshTiers, writePresetContextLength } from './src/engine.js'
 import { readToken, readPresetContextLength } from './src/engine.js'
-import { startOfficialLogin, startCallbackListener, parseToken, decodeClaims, saveToken, loadToken, clearToken, LOGIN_URL, loginPageUrl, LOGIN_MESSAGE_TYPE } from './src/login.js'
+import { startOfficialLogin, parseToken, decodeClaims, saveToken, loadToken, clearToken, LOGIN_URL, loginPageUrl, LOGIN_MESSAGE_TYPE, AUTH_ENDPOINT } from './src/login.js'
+import { openLoginWindow, readLoginWindow } from './src/loginwindow.js'
 import { clearSignedOut } from './src/engine.js'
 
 export const name = 'teleagent'
@@ -211,55 +212,24 @@ export function apply(ctx, config = {}) {
               const body = await readBody(req)
               const action = String(body.action ?? 'start')
               if (action === 'start') {
-                // Open a loopback listener first, then hand the official page a
-                // redirect pointing at it: the WEB flow is the only one that
-                // honours a caller-supplied redirect, and it makes the token
-                // arrive here without the user copying anything.
-                if (pending) { try { pending.close() } catch {} pending = null }
-                const l = await startCallbackListener()
-                pending = { listener: l, port: l.port }
-                const r = startOfficialLogin(`http://127.0.0.1:${l.port}/callback`)
-                return writeJson(res, 200, { ok: true, ...r, listening: true, port: l.port, loginPage: loginPageUrl() })
+                // Open a window the plugin owns and watch the URLs it navigates
+                // through. A system browser cannot hand the redirect back, and a
+                // loopback redirect is ignored by the auth endpoint, so owning
+                // the window is the only way to receive the token automatically —
+                // this is also how the official client does it.
+                const r = openLoginWindow({ entryUrl: startOfficialLogin().url, stateDir: engine.stateDir })
+                return writeJson(res, r.ok ? 200 : 500, { ...r, loginPage: loginPageUrl({}) })
               }
               if (action === 'pending') {
-                if (!pending) return writeJson(res, 200, { ok: true, done: false })
-                const t = pending.listener.server?.token ?? null
-                if (!t) return writeJson(res, 200, { ok: true, done: false })
-                const parsed = parseToken(t)
-                const claims = parsed ? decodeClaims(parsed) : null
-                if (parsed) { saveToken(parsed); clearSignedOut(engine.stateDir) }
-                try { pending.close() } catch {}
-                pending = null
+                const w = readLoginWindow(engine.stateDir)
+                if (!w.done) return writeJson(res, 200, { ok: true, done: false, status: w.status, currentUrl: w.currentUrl })
+                const parsed = parseToken(w.token)
+                if (!parsed) return writeJson(res, 200, { ok: true, done: false, status: 'unparsable' })
+                const claims = decodeClaims(parsed)
+                saveToken(parsed)
+                clearSignedOut(engine.stateDir)
                 await publish()
                 return writeJson(res, 200, { ok: true, done: true, account: claims?.accountName ?? claims?.accountId ?? null })
-              }
-              if (action === 'startKernel') {
-                try { await engine.start(); return writeJson(res, 200, { ok: true, running: true }) }
-                catch (e) { return writeJson(res, 200, { ok: false, running: false, error: String(e?.message ?? e) }) }
-              }
-              if (action === 'stopKernel') {
-                await engine.stop()
-                return writeJson(res, 200, { ok: true, running: false })
-              }
-              if (action === 'openExternal') {
-                const r = startOfficialLogin()
-                return writeJson(res, 200, { ok: true, ...r })
-              }
-              if (action === 'submit') {
-                const token = parseToken(body.token)
-                if (!token) return writeJson(res, 400, { ok: false, error: '无法识别 token：请粘贴登录后跳转的完整地址，或 token 本身' })
-                const claims = decodeClaims(token)
-                if (claims?.exp && claims.exp * 1000 <= Date.now()) {
-                  return writeJson(res, 400, { ok: false, error: '该 token 已过期，请重新登录' })
-                }
-                saveToken(token)
-                return writeJson(res, 200, { ok: true, account: claims?.accountName ?? claims?.accountId ?? null,
-                  expires: claims?.exp ? new Date(claims.exp * 1000).toISOString() : null })
-              }
-              if (action === 'setContext') {
-                const r = writePresetContextLength(body.value)
-                await publish()
-                return writeJson(res, r.ok ? 200 : 400, r)
               }
               if (action === 'logout') {
                 clearToken()

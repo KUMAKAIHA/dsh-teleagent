@@ -131,15 +131,8 @@ export async function startCallbackListener({ port = 0, signal } = {}) {
  * token never reaches us.
  */
 export function startOfficialLogin(redirectUrl) {
-  const u = new URL(LOGIN_PAGE_URL)
-  u.searchParams.set('view', 'login')
-  if (redirectUrl) {
-    u.searchParams.set('source', LOGIN_SOURCE.WEB)
-    u.searchParams.set('redirect_url', redirectUrl)
-  } else {
-    u.searchParams.set('source', LOGIN_SOURCE.DESKTOP)
-  }
-  return { url: u.toString(), opened: openBrowser(u.toString()) }
+  const url = loginPageUrl({ redirectUrl })
+  return { url, opened: openBrowser(url) }
 }
 
 /**
@@ -154,26 +147,40 @@ export function startOfficialLogin(redirectUrl) {
 export const LOGIN_MESSAGE_TYPE = 'loginRedirect'
 
 /**
- * The login page that embeds the relay (the app's own APP_PAGE).
+ * Where sign-in actually starts.
  *
- * `source` selects the flow and is NOT optional: the page resolves it as
- * `source = isKnown(value) ? value : WEB`, and only the DESKTOP flow redirects
- * to the desktop callback we can capture. Loading the page without it falls
- * through to the WEB flow, whose redirect targets a different origin — which is
- * exactly the "sign-in timed out" behaviour seen before this was pinned down.
+ * This is the *auth endpoint* `/superCowork/sapi/cowork/auth`, which answers 302
+ * to the provider's unified sign-in page. The `/meter/teleagent-login/login` URL
+ * is only the login SHELL that the desktop app embeds; pointing a browser at it
+ * with an auth `source` does nothing useful — it tries to render an embedded
+ * auth frame, suspends, and leaves a blank page (React error #426).
  *
- *   DESKTOP = '01'   CLOUD_PC = '02'   WEB = '03'
+ * Verified: the auth endpoint responds 302 to
+ * `teleai.com.cn/aicloud-api/upms/public/auth/authorize?...`, which is the real
+ * sign-in form.
+ *
+ *   source: DESKTOP = '01'   CLOUD_PC = '02'   WEB = '03'
  */
+export const AUTH_ENDPOINT = 'https://agent.teleai.com.cn/superCowork/sapi/cowork/auth'
+
+/** The app's embedded login shell. Kept for reference; not used to start sign-in. */
 export const LOGIN_PAGE_URL = 'https://agent.teleai.com.cn/meter/teleagent-login/login'
 
 /** `source` values accepted by the login page. */
 export const LOGIN_SOURCE = { DESKTOP: '01', CLOUD_PC: '02', WEB: '03' }
 
-/** Build the URL for the embedded login page. */
-export function loginPageUrl({ tokenCode, source = LOGIN_SOURCE.DESKTOP } = {}) {
-  const u = new URL(LOGIN_PAGE_URL)
-  u.searchParams.set('view', 'login')
-  u.searchParams.set('source', source)
+/**
+ * Build the login page URL.
+ *
+ * `redirectUrl` is only honoured by the WEB flow; passing it with DESKTOP
+ * silently does nothing, and the token then goes to the desktop app instead of
+ * back to us — which is why an earlier revision opened a page that could never
+ * complete. `source` is therefore forced to WEB whenever a redirect is given.
+ */
+export function loginPageUrl({ tokenCode, source, redirectUrl } = {}) {
+  const u = new URL(AUTH_ENDPOINT)
+  u.searchParams.set('source', redirectUrl ? LOGIN_SOURCE.WEB : (source ?? LOGIN_SOURCE.DESKTOP))
+  if (redirectUrl) u.searchParams.set('redirect_url', redirectUrl)
   if (tokenCode) u.searchParams.set('tokenCode', tokenCode)
   return u.toString()
 }

@@ -119,6 +119,33 @@ try {
   process.exitCode = 1
 }
 
+// 10. Owned sign-in window: the pieces that must work without a real sign-in.
+try {
+  const lw = await import(P + '/src/loginwindow.js')
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ta-win-'))
+  const electron = lw.findElectron()
+  // Build a channel by hand rather than opening a window: this checks the
+  // contract the host polls, which is what the panel depends on.
+  const cd = lw.channelDir(dir)
+  fs.mkdirSync(cd, { recursive: true })
+  const fake = 'AB12:eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjk5OTk5OTk5OTl9.sig'
+  fs.writeFileSync(path.join(cd, 'token'), fake)
+  fs.writeFileSync(path.join(cd, 'status'), 'done')
+  fs.writeFileSync(path.join(cd, 'current-url'), 'https://x/auth?token=' + fake)
+  const w = lw.readLoginWindow(dir)
+  fs.rmSync(dir, { recursive: true, force: true })
+  const ok = w.done && w.token === fake && w.status === 'done'
+  console.log('10. login window     :', ok ? 'channel contract OK' : 'FAILED')
+  console.log('    electron runtime :', electron ? 'found' : 'MISSING (set TA_ELECTRON_PATH)')
+  if (!ok) process.exitCode = 1
+} catch (e) {
+  console.log('10. login window     : ERROR -', e.message)
+  process.exitCode = 1
+}
+
 console.log('\nall offline checks done')
 // The plugin installs a status interval; exit explicitly rather than waiting.
 process.exit(0)
